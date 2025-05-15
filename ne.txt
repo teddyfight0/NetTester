@@ -7,9 +7,13 @@
 #7、例程的应用层使用的autoSendSize是自动发送的数据长度，单位是bit
 #8、层间接口数据格式用lowerMode和upperMode参数表示，同一个设备下层对上的upperMode与上层对下的lowerMode之间要相同。默认值为0——比特数组流。尤其要注意物理层的uppMode参数。
 #9、全网可设定一个统一的观测点，CmdIpAddr和CmdPort，用来接收带外命令的，比如统一关机，发送特定数据等，也可用来收集各网元各层状态信息，做集中展示，
-#10、本例为仿真两个相连的网元，每个网元只有一个高层
-#    网元1                                     网元2
+#10、本例为仿真两个相连的网元，每个网元具有四层结构
+#    网元1                        网元2
 #  APP层实体0  11400           APP层实体0 12400
+#      |                                          |
+#  NET层实体0  11300           NET层实体0 12300
+#      |                                           |
+#  LNK层实体0  11200           LNK层实体0 12200
 #      |                                           |    
 #  PHY层实体0  11100           PHY层实体0 12100
 #      |                                           |       
@@ -27,8 +31,8 @@
 #   PHY1
 #   PHY2 LNK1
 #   PHY3
-1 PHY0  APP0
-2 PHY0  APP0
+1 | PHY[0] | LNK[0] | NET[0] | APP[0]
+2 | PHY[0] | LNK[0] | NET[0] | APP[0]
 ---------------------------------------------------------
 #全网拓扑连接描述区域，请注意参数中的标点符号都是英文格式
 #	点到点连接，格式 : A设备号,物理层接口号--B设备号,物理层接口号
@@ -38,38 +42,56 @@
 1,0--2,0
 ---------------------------------------------------------
 #统一控制平台的工作位置，等号不留空格
+oneTouchAddr=127.0.0.1
+oneTouchPort=30333
 cmdIpAddr=127.0.0.1
 cmdPort=20000
+phySlotTime = 20
+trafficPlotRate = 100
+errorProb = 20
+bufferSize = 80000
+heartBeatingTime = 50
+autoSendTime = 10
+autoSendSize = 100
+workMode = 0
+upperMode = 1
+lowerMode = 1
 ---------------------------------------------------------
 #其它参数区域，存放实验者自行定义的各种参数，如果用例程中的cfgFileParms类，通过getValueInt和getValueStr，提供参数名，就能得到参数值
 #除了开头三行必须保持顺序：deviceID，layer,entity,其他参数行的位置可以交换，没有写出来的物理层实体参数，程序会使用默认参数
 deviceID = 1
 	layer = PHY
 		entityID = 0
-			errorProb = 0
-			bufferSize = 80000
 			upperMode = 0
 		-----------------------------
+	layer = LNK
+		entityID = 0
+			myAddr = 10
+			lowerMode = 0
+		------------------------------
+	layer = NET
+		entityID = 0
+			myAddr = 1
+		------------------------------
 	layer = APP
 		entityID = 0
-			workMode = 0
 			myAddr = 1
-			autoSendTime = 10
-			autoSendSize = 2
-			lowerMode = 0
 ----------------------------------------------------------
 deviceID = 2
 	layer = PHY
 		entityID = 0
-			errorProb = 0
-			bufferSize = 80000
 			upperMode = 0
 		-----------------------------
+	layer = LNK
+		entityID = 0
+			myAddr = 20
+			lowerMode = 0
+		------------------------------
+	layer = NET
+		entityID = 0
+			myAddr = 2
+		------------------------------
 	layer = APP
 		entityID = 0
 			myAddr = 2
-			workMode = 0
-			autoSendTime = 10
-			autoSendSize = 2
-			lowerMode = 0
 ----------------------------------------------------------

@@ -12,7 +12,7 @@ U8* sendbuf;        //用来组织发送数据的缓存，大小为MAX_BUFFER_SIZE,可以在这个基
 int printCount = 0; //打印控制
 int spin = 0;  //打印动态信息控制
 
-//------华丽的分割线，一些统计用的全局变量------------
+//------一些统计用的全局变量------------
 int iSndTotal = 0;  //发送数据总量
 int iSndTotalCount = 0; //发送数据总次数
 int iSndErrorCount = 0;  //发送错误次数
@@ -21,6 +21,8 @@ int iRcvForwardCount = 0; //转发数据总次数
 int iRcvToUpper = 0;      //从低层递交高层数据总量
 int iRcvToUpperCount = 0;  //从低层递交高层数据总次数
 int iRcvUnknownCount = 0;  //收到不明来源数据总次数
+
+
 
 //打印统计信息
 void print_statistics();
@@ -35,7 +37,6 @@ void InitFunction(CCfgFileParms& cfgParms)
 	sendbuf = (char*)malloc(MAX_BUFFER_SIZE);
 	if (sendbuf == NULL ) {
 		cout << "内存不够" << endl;
-		//这个，计算机也太，退出吧
 		exit(0);
 	}
 	return;
@@ -51,6 +52,92 @@ void EndFunction()
 		free(sendbuf);
 	return;
 }
+
+//-----------------------------------------------------------------------------------
+// 以下内容是ip数据包
+
+// 路由表项结构
+struct RouteEntry {
+	in_addr destIP;      // 目的IP地址
+	in_addr nextHop;     // 下一跳IP
+	int outPort;         // 出接口号
+	bool isValid;        // 是否有效
+};
+
+// 全局变量
+const int MAX_ROUTE_ENTRIES = 20;  // 最大路由表项数
+RouteEntry routeTable[MAX_ROUTE_ENTRIES];  // 路由表
+int routeCount = 0;  // 当前路由表项数
+// IP-Port映射表项结构 (类似ARP表)
+// IP-Port映射表项结构 (类似ARP表)
+struct IPPortMapping {
+	in_addr ipAddr;      // IP地址
+	int port;           // 对应的端口号 
+	bool isValid;       // 是否有效
+
+	// MAC地址结构(6字节)
+	struct MacAddress {
+		U8 bytes[6];    // MAC地址字节数组
+	} mac;
+
+	// 根据IP地址生成MAC地址
+	void generateMACFromIP() {
+		// 清零MAC地址
+		memset(mac.bytes, 0, sizeof(mac.bytes));
+
+		// 从IP地址(127.0.x.x格式)提取网元号和端口号
+		UCHAR* ipBytes = (UCHAR*)&ipAddr.S_un.S_addr;
+
+		// 网元号在第3个字节(x.x.DeviceID.x)
+		int devNum = ipBytes[2];  // 获取网元号
+		mac.bytes[0] = 0;         // 高字节设为0
+		mac.bytes[1] = devNum;    // 低字节为网元号
+
+		// 端口号在第4个字节(x.x.x.PortID)
+		int portNum = ipBytes[3]; // 获取端口号
+		mac.bytes[2] = 0;        // 高字节设为0 
+		mac.bytes[3] = portNum;  // 低字节为端口号
+
+		// 最后两个字节在错误的时候把地端口号进行替换
+		mac.bytes[4] = 1;
+		mac.bytes[5] = 2;
+	}
+
+	// 获取MAC地址的字符串表示
+	string getMACString() const {
+		char macStr[18];
+		snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+			mac.bytes[0], mac.bytes[1], mac.bytes[2],
+			mac.bytes[3], mac.bytes[4], mac.bytes[5]);
+		return string(macStr);
+	}
+};
+
+// 在function.cpp开头添加全局变量
+const int MAX_IP_PORT_MAPPINGS = 20;
+IPPortMapping ipPortMappings[MAX_IP_PORT_MAPPINGS];
+int mappingCount = 0;
+
+// 添加lookupIPPort函数的实现
+int lookupIPPort(in_addr destIP) {
+	for (int i = 0; i < mappingCount; i++) {
+		if (ipPortMappings[i].isValid &&
+			ipPortMappings[i].ipAddr.S_un.S_addr == destIP.S_un.S_addr) {
+			return ipPortMappings[i].port;
+		}
+	}
+	return -1;
+}
+// IP头部结构
+struct IPHeader {
+	in_addr srcIP;   // 源IP
+	in_addr destIP;  // 目的IP
+	U8 data[0];      // 数据部分
+};
+
+
+
+//---------------------------------------------------------------------------------
 
 //***************重要函数提醒******************************
 //名称：TimeOut
@@ -85,41 +172,70 @@ void TimeOut()
 //         2)判断iWorkMode，看看是不是需要将发送的数据内容都打印，调试时可以，正式运行时不建议将内容全部打印。
 //输入：U8 * buf,高层传进来的数据， int len，数据长度，单位字节
 //输出：
-void RecvfromUpper(U8* buf, int len)
-{
-	int iSndRetval;
+void RecvfromUpper(U8* buf, int len) {
+	int iSndRetval = 0;
 	U8* bufSend = NULL;
-	//是高层数据，只从接口0发出去,高层接口默认都是字节流数据格式
-	if (lowerMode[0] == 0) {
-		//接口0的模式为bit数组，先转换成bit数组，放到bufSend里
-		bufSend = (char*)malloc(len * 8);
-		if (bufSend == NULL) {
-			return;
+
+	in_addr destIP;
+	memcpy(&destIP, buf, sizeof(in_addr));
+
+	int ipPacketLen = sizeof(IPHeader) + len - sizeof(in_addr);
+	U8* ipPacket = (U8*)malloc(ipPacketLen);
+	if (!ipPacket) {
+		cout << "内存不足" << endl;
+		return;
+	}
+
+	IPHeader* ipHdr = (IPHeader*)ipPacket;
+	ipHdr->srcIP = local_addr.sin_addr;
+	ipHdr->destIP = destIP;
+	memcpy(ipHdr->data, buf + sizeof(in_addr), len - sizeof(in_addr));
+
+	int outPort = lookupIPPort(destIP);
+	if (outPort < 0) {
+		printf("\n[NET]未找到IP %s的端口映射,广播转发\n", inet_ntoa(destIP));
+		for (int i = 0; i < lowerNumber; i++) {
+			if (lowerMode[i] == 0) {
+				bufSend = (U8*)malloc(ipPacketLen * 8);
+				if (!bufSend) {
+					free(ipPacket); // 释放 ipPacket
+					cout << "内存不足" << endl;
+					return;
+				}
+				iSndRetval = ByteArrayToBitArray(bufSend, ipPacketLen * 8, ipPacket, ipPacketLen);
+				if (iSndRetval > 0) {
+					SendtoLower(bufSend, iSndRetval, i);
+				}
+				free(bufSend);
+			}
+			else {
+				iSndRetval = SendtoLower(ipPacket, ipPacketLen, i);
+			}
 		}
-		iSndRetval = ByteArrayToBitArray(bufSend, len * 8, buf, len);
-		//发送
-		iSndRetval = SendtoLower(bufSend, iSndRetval, 0); //参数依次为数据缓冲，长度，接口号
 	}
 	else {
-		//下层是字节数组接口，可直接发送
-		iSndRetval = SendtoLower(buf, len, 0);
-		iSndRetval = iSndRetval * 8;//换算成位
+		printf("\n[NET]转发IP包 %s -> %s 从端口 %d\n",
+			inet_ntoa(ipHdr->srcIP), inet_ntoa(ipHdr->destIP), outPort);
+		if (lowerMode[outPort] == 0) {
+			bufSend = (U8*)malloc(ipPacketLen * 8);
+			if (!bufSend) {
+				free(ipPacket); // 释放 ipPacket
+				cout << "内存不足" << endl;
+				return;
+			}
+			iSndRetval = ByteArrayToBitArray(bufSend, ipPacketLen * 8, ipPacket, ipPacketLen);
+			if (iSndRetval > 0) {
+				SendtoLower(bufSend, iSndRetval, outPort);
+			}
+			free(bufSend);
+		}
+		else {
+			iSndRetval = SendtoLower(ipPacket, ipPacketLen, outPort);
+		}
 	}
-	//如果考虑设计停等协议等重传协议，这份数据需要缓冲起来，应该另外申请空间，把buf或bufSend的内容保存起来，以备重传
-	if (bufSend != NULL) {
-		//保存bufSend内容，CODES NEED HERE
 
-		//本例程没有设计重传协议，不需要保存数据，所以将空间释放
-		free(bufSend);
-	}
-	else {
-		//保存buf内容，CODES NEED HERE
+	free(ipPacket); // 确保释放
 
-		//本例程没有设计重传协议，不需要保存数据，buf是输入参数，也不需要释放空间
-
-	}
-
-	//统计
 	if (iSndRetval <= 0) {
 		iSndErrorCount++;
 	}
@@ -127,139 +243,72 @@ void RecvfromUpper(U8* buf, int len)
 		iSndTotal += iSndRetval;
 		iSndTotalCount++;
 	}
-	//printf("\n收到上层数据 %d 位，发送到接口0\n", retval * 8);
-	//打印
-	switch (iWorkMode % 10) {
-	case 1:
-		cout << endl << "高层要求向接口 " << 0 << " 发送数据：" << endl;
-		print_data_bit(buf, len, 1);
-		break;
-	case 2:
-		cout << endl << "高层要求向接口 " << 0 << " 发送数据：" << endl;
-		print_data_byte(buf, len, 1);
-		break;
-	case 0:
-		break;
-	}
-
 }
+
 //***************重要函数提醒******************************
 //名称：RecvfromLower
 //功能：本函数被调用时，意味着得到一份从低层实体递交上来的数据
-//      函数内容全部可以替换成设计者想要的样子
-//      例程功能介绍：
-//          1)例程实现了一个简单粗暴不讲道理的策略，所有从接口0送上来的数据都直接转发到接口1，而接口1的数据上交给高层，就是这么任性
-//          2)转发和上交前，判断收进来的格式和要发送出去的格式是否相同，否则，在bite流数组和字节流数组之间实现转换
-//            注意这些判断并不是来自数据本身的特征，而是来自配置文件，所以配置文件的参数写错了，判断也就会失误
-//          3)根据iWorkMode，判断是否需要把数据内容打印
 //输入：U8 * buf,低层递交上来的数据， int len，数据长度，单位字节，int ifNo ，低层实体号码，用来区分是哪个低层
 //输出：
-void RecvfromLower(U8* buf, int len, int ifNo)
-{
-	int iSndRetval;
+void RecvfromLower(U8* buf, int len, int ifNo) {
+	int iSndRetval = 0; // 初始化
 	U8* bufSend = NULL;
-	if (ifNo == 0 && lowerNumber > 1) {
-		//从接口0收到的数据，直接转发到接口1 —— 仅仅用于测试
-		if (lowerMode[0] == lowerMode[1]) {
-			//接口0和1的数据格式相同，直接转发
-			iSndRetval = SendtoLower(buf, len, 1);
-			if (lowerMode[0] == 1) {
-				iSndRetval = iSndRetval * 8;//如果接口格式为bit数组，统一换算成位，完成统计
-			}
-		}
-		else {
-			//接口0与接口1的数据格式不同，需要转换后，再发送
-			if (lowerMode[0] == 1) {
-				//从接口0到接口1，接口0是字节数组，接口1是比特数组，需要扩大8倍转换
-				bufSend = (U8*)malloc(len * 8);
-				if (bufSend == NULL) {
-					cout << "内存空间不够，导致数据没有被处理" << endl;
-					return;
-				}
-				//byte to bit
-				iSndRetval = ByteArrayToBitArray(bufSend, len * 8, buf, len);
-				iSndRetval = SendtoLower(bufSend, iSndRetval, 1);
-			}
-			else {
-				//从接口0到接口1，接口0是比特数组，接口1是字节数组，需要缩小八分之一转换
-				bufSend = (U8*)malloc(len / 8 + 1);
-				if (bufSend == NULL) {
-					cout << "内存空间不够，导致数据没有被处理" << endl;
-					return;
-				}
-				//bit to byte
-				iSndRetval = BitArrayToByteArray(buf, len, bufSend, len / 8 + 1);
-				iSndRetval = SendtoLower(bufSend, iSndRetval, 1);
 
-				iSndRetval = iSndRetval * 8;//换算成位，做统计
-
-			}
-		}
-		//统计
-		if (iSndRetval <= 0) {
-			iSndErrorCount++;
-		}
-		else {
-			iRcvForward += iSndRetval;
-			iRcvForwardCount++;
-		}
+	if (len < sizeof(IPHeader)) {
+		cout << "接收到的数据太短,无法解析IP头" << endl;
+		return;
 	}
-	else {
-		//非接口0的数据，或者低层只有1个接口的数据，都向上递交
+
+	IPHeader* ipHdr = (IPHeader*)buf;
+
+	if (ipHdr->destIP.S_un.S_addr == local_addr.sin_addr.S_un.S_addr) {
 		if (lowerMode[ifNo] == 0) {
-			//如果接口0是比特数组格式，高层默认是字节数组，先转换成字节数组，再向上递交
-			bufSend = (U8*)malloc(len / 8 + 1);
+			int byteLen = (len + 7) / 8;
+			bufSend = (U8*)malloc(byteLen);
 			if (bufSend == NULL) {
-				cout << "内存空间不够，导致数据没有被处理" << endl;
+				cout << "内存不足" << endl;
 				return;
 			}
-			iSndRetval = BitArrayToByteArray(buf, len, bufSend, len / 8 + 1);
-			iSndRetval = SendtoUpper(bufSend, iSndRetval);
-			iSndRetval = iSndRetval * 8;//换算成位,进行统计
-
+			iSndRetval = BitArrayToByteArray(buf, len, bufSend, byteLen);
+			if (iSndRetval > 0) {
+				iSndRetval = SendtoUpper(bufSend, iSndRetval);
+			}
+			free(bufSend);
 		}
 		else {
-			//低层是字节数组接口，可直接递交
 			iSndRetval = SendtoUpper(buf, len);
-			iSndRetval = iSndRetval * 8;//换算成位，进行统计
 		}
-		//统计
-		if (iSndRetval <= 0) {
-			iSndErrorCount++;
-		}
-		else {
+		if (iSndRetval > 0) {
 			iRcvToUpper += iSndRetval;
 			iRcvToUpperCount++;
 		}
 	}
-	//如果需要重传等机制，可能需要将buf或bufSend中的数据另外申请空间缓存起来
-	if (bufSend != NULL) {
-		//缓存bufSend数据，如果有必要的话
-
-		//本例程中没有停等协议，bufSend的空间在用完以后需要释放
-		free(bufSend);
-	}
 	else {
-		//缓存buf里的数据，如果有必要的话
-
-		//buf空间不需要释放
+		int outPort = lookupIPPort(ipHdr->destIP);
+		if (outPort >= 0 && outPort != ifNo) {
+			if (lowerMode[outPort] == 0) {
+				bufSend = (U8*)malloc(len * 8);
+				if (bufSend == NULL) {
+					cout << "内存不足" << endl;
+					return;
+				}
+				iSndRetval = ByteArrayToBitArray(bufSend, len * 8, buf, len);
+				if (iSndRetval > 0) {
+					iSndRetval = SendtoLower(bufSend, iSndRetval, outPort);
+				}
+				free(bufSend);
+			}
+			else {
+				iSndRetval = SendtoLower(buf, len, outPort);
+			}
+			if (iSndRetval > 0) {
+				iRcvForward += iSndRetval;
+				iRcvForwardCount++;
+			}
+		}
 	}
-
-	//打印
-	switch (iWorkMode % 10) {
-	case 1:
-		cout <<endl<< "接收接口 " << ifNo << " 数据：" << endl;
-		print_data_bit(buf, len, lowerMode[ifNo]);
-		break;
-	case 2:
-		cout << endl << "接收接口 " << ifNo << " 数据：" << endl;
-		print_data_byte(buf, len, lowerMode[ifNo]);
-		break;
-	case 0:
-		break;
-	}
-
 }
+
 void print_statistics()
 {
 	if (printCount % 10 == 0) {
@@ -346,78 +395,139 @@ void menu()
 	U8* bufSend;
 	//发送|打印：[发送控制（0，等待键盘输入；1，自动）][打印控制（0，仅定期打印统计信息；1，按bit流打印数据，2按字节流打印数据]
 	cout << endl << endl << "设备号:" << strDevID << ",    层次:" << strLayer << ",    实体号:" << strEntity ;
-	cout << endl << "1-启动自动发送(无效);" << endl << "2-停止自动发送（无效）; " << endl << "3-从键盘输入发送; ";
-	cout << endl << "4-仅打印统计信息; " << endl << "5-按比特流打印数据内容;" << endl << "6-按字节流打印数据内容;";
-	cout << endl << "7-打印工作参数表; ";
+	printf("\n");
+	cout << "8-自动数据封装和转发测试" << endl;
 	cout << endl << "0-取消" << endl << "请输入数字选择命令：";
 	cin >> selection;
 	switch (selection) {
 	case 0:
-
 		break;
 	case 1:
-		iWorkMode = 10 + iWorkMode % 10;
 		break;
 	case 2:
-		iWorkMode = iWorkMode % 10;
 		break;
 	case 3:
-		cout << "输入字符串(,不超过100字符)：";
-		cin >> kbBuf;
-		cout << "输入低层接口号：";
-		cin >> port;
-
-		len = (int)strlen(kbBuf) + 1; //字符串最后有个结束符
-		if (port >= lowerNumber) {
-			cout << "没有这个接口" << endl;
-			return;
-		}
-		if (lowerMode[port] == 0) {
-			//下层接口是比特流数组,需要一片新的缓冲来转换格式
-			bufSend = (U8*)malloc(len * 8);
-
-			iSndRetval = ByteArrayToBitArray(bufSend, len * 8, kbBuf, len);
-			iSndRetval = SendtoLower(bufSend, iSndRetval, port);
-			free(bufSend);
-		}
-		else {
-			//下层接口是字节数组，直接发送
-			iSndRetval = SendtoLower(kbBuf, len, port);
-			iSndRetval = iSndRetval * 8; //换算成位
-		}
-		//发送统计
-		if (iSndRetval > 0) {
-			iSndTotalCount++;
-			iSndTotal += iSndRetval;
-		}
-		else {
-			iSndErrorCount++;
-		}
-		//看要不要打印数据
-		cout << endl << "向接口 " << port << " 发送数据：" << endl;
-		switch (iWorkMode % 10) {
-		case 1:
-			print_data_bit(kbBuf, len, 1);
-			break;
-		case 2:
-			print_data_byte(kbBuf, len, 1);
-			break;
-		case 0:
-			break;
-		}
 		break;
 	case 4:
-		iWorkMode = (iWorkMode / 10) * 10 + 0;
 		break;
 	case 5:
-		iWorkMode = (iWorkMode / 10) * 10 + 1;
 		break;
 	case 6:
-		iWorkMode = (iWorkMode / 10) * 10 + 2;
 		break;
 	case 7:
 		PrintParms();
 		break;
+	case 8: {
+		cout << "自动数据封装和比特流转发测试:" << endl;
+
+		// 构造测试数据
+		const int testDataSize = 100; // 合理大小
+		U8* testData = (U8*)malloc(testDataSize);
+		if (!testData) {
+			cout << "内存不足" << endl;
+			break;
+		}
+		int testLen = snprintf((char*)testData, testDataSize, "Test Message");
+		if (testLen < 0 || testLen >= testDataSize) {
+			free(testData);
+			cout << "测试数据构造失败" << endl;
+			break;
+		}
+
+		// 打印原始数据（字节流）
+		cout << "原始数据（字节流）:" << endl;
+		print_data_byte(testData, testLen, 1);
+
+		// 转换为比特流
+		int bitLen = testLen * 8; // 每个字节8位
+		U8* bitData = (U8*)malloc(bitLen);
+		if (!bitData) {
+			free(testData);
+			cout << "内存不足" << endl;
+			break;
+		}
+		int bitDataLen = ByteArrayToBitArray(bitData, bitLen, testData, testLen);
+		if (bitDataLen <= 0) {
+			free(testData);
+			free(bitData);
+			cout << "字节到比特转换失败" << endl;
+			break;
+		}
+
+		// 打印比特流
+		cout << "\n测试数据（比特流）:" << endl;
+		print_data_bit(bitData , bitDataLen ,0); // 假设存在打印比特流的函数
+
+		// 构造IP包（基于原始字节流）
+		int ipPacketLen = sizeof(IPHeader) + testLen;
+		U8* ipPacket = (U8*)malloc(ipPacketLen);
+		if (!ipPacket) {
+			free(testData);
+			free(bitData);
+			cout << "内存不足" << endl;
+			break;
+		}
+		IPHeader* ipHdr = (IPHeader*)ipPacket;
+		ipHdr->srcIP = local_addr.sin_addr;
+		ipHdr->destIP = lower_addr[0].sin_addr;
+		memcpy(ipHdr->data, testData, testLen);
+
+		// 打印IP包（字节流）
+		cout << "\nIP封装后的数据（字节流）:" << endl;
+		print_data_byte(ipPacket, ipPacketLen, 1);
+
+		// 将IP包转换为比特流
+		int ipBitLen = ipPacketLen * 8;
+		U8* ipBitData = (U8*)malloc(ipBitLen);
+		if (!ipBitData) {
+			free(testData);
+			free(bitData);
+			free(ipPacket);
+			cout << "内存不足" << endl;
+			break;
+		}
+		int ipBitDataLen = ByteArrayToBitArray(ipBitData, ipBitLen, ipPacket, ipPacketLen);
+		if (ipBitDataLen <= 0) {
+			free(testData);
+			free(bitData);
+			free(ipPacket);
+			free(ipBitData);
+			cout << "IP包字节到比特转换失败" << endl;
+			break;
+		}
+
+		// 打印IP包（比特流）
+		cout << "\nIP封装后的数据（比特流）:" << endl;
+		print_data_bit(ipBitData , ipBitDataLen , 0);
+
+		// 比特流转发测试
+		cout << "\n向下转发测试（比特流）:" << endl;
+		for (int i = 0; i < lowerNumber; i++) {
+			cout << "向接口 " << i << " 转发比特流:" << endl;
+			int sendRet = SendtoLower(ipBitData, ipBitDataLen, i);
+			if (sendRet > 0) {
+				iSndTotal += sendRet;
+				iSndTotalCount++;
+			}
+			else {
+				iSndErrorCount++;
+			}
+		}
+
+		cout << "\n向上转发测试（比特流）:" << endl;
+		int sendRet = SendtoUpper(ipBitData, ipBitDataLen);
+		if (sendRet > 0) {
+			iRcvToUpper += sendRet;
+			iRcvToUpperCount++;
+		}
+
+		// 释放内存
+		free(testData);
+		free(bitData);
+		free(ipPacket);
+		free(ipBitData);
+		break;
 	}
 
+	}
 }
